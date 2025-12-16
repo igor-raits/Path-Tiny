@@ -2097,9 +2097,14 @@ sub slurp {
     if ( ( defined($binmode) ? $binmode : "" ) eq ":unix"
         and my $size = -s $fh )
     {
-        my $buf;
-        my $rc = read $fh, $buf, $size; # File::Slurp in a nutshell
-        $self->_throw('read') unless defined $rc;
+        my $buf = "";
+        my $total_read = 0;
+        while ($total_read < $size) {
+            my $rc = read $fh, $buf, $size - $total_read, $total_read;
+            $self->_throw('read') unless defined $rc;
+            last if $rc == 0; # EOF
+            $total_read += $rc;
+        }
         return $buf;
     }
     else {
