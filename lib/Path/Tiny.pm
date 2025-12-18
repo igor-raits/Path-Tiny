@@ -2094,11 +2094,20 @@ sub slurp {
     my $binmode = $args->{binmode};
     $binmode = ( ( caller(0) )[10] || {} )->{'open<'} unless defined $binmode;
     my $fh = $self->filehandle( { locked => 1 }, "<", $binmode );
-    if ( ( defined($binmode) ? $binmode : "" ) eq ":unix"
-        and my $size = -s $fh )
+    if ( defined($binmode) and $binmode eq ":unix"
+        and my $total_left = -s $fh )
     {
-        my $buf;
-        my $rc = read $fh, $buf, $size; # File::Slurp in a nutshell
+        # Read in a loop to handle read() syscall size limit (~2GB)
+        my $buf = "";
+        my $total_read = 0;
+        my $rc = 0;
+        while ( $rc = read $fh, $buf, $total_left, $total_read ) {
+            $total_read += $rc;
+            # Ensure we will keep read()ing until we get 0 or undef
+            # even if someone else changed the file length from under us
+            $total_left = ( -s $fh ) - $total_read;
+            $total_left = 1 if $total_left < 1;
+        }
         $self->_throw('read') unless defined $rc;
         return $buf;
     }
@@ -2178,7 +2187,22 @@ sub spew {
             : "error opening temp file for atomic write: $@";
         $self->_throw('spew', $self->[PATH], $msg);
     }
-    print( {$fh} map { ref eq 'ARRAY' ? @$_ : $_ } @data) or $self->_throw('print', $temp->[PATH]);
+    if ( defined($binmode) and $binmode eq ":unix" ) {
+        # Use syswrite in a loop to handle write() syscall size limit (~2GB)
+        for my $data ( map { ref eq 'ARRAY' ? @$_ : $_ } @data ) {
+            my $total_left = length $data;
+            my $total_written = 0;
+            my $rc = 0;
+            while ( $total_left and ( $rc = syswrite $fh, $data, $total_left, $total_written ) ) {
+               $total_left -= $rc;
+               $total_written += $rc;
+            }
+            $self->_throw('syswrite', $temp->[PATH]) unless defined $rc;
+        }
+    }
+    else {
+        print( {$fh} map { ref eq 'ARRAY' ? @$_ : $_ } @data) or $self->_throw('print', $temp->[PATH]);
+    }
     close $fh or $self->_throw( 'close', $temp->[PATH] );
 
     return $temp->move($resolved_path);
